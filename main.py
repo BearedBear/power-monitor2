@@ -158,5 +158,7 @@ async def telegram_webhook(req: Request):
 
 @app.on_event("startup")
 async def startup():
+    await tg_app.initialize()          # 🔥 ОЦЕ КЛЮЧ
     await bot.set_webhook(url=RENDER_URL + WEBHOOK_PATH)
+
 # ============================================
