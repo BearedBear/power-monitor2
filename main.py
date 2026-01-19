@@ -1,29 +1,28 @@
 import sqlite3
-import asyncio
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, Header, HTTPException
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-)
+from fastapi import FastAPI, Header, HTTPException, Request
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ================== НАЛАШТУВАННЯ ==================
-API_KEY = "DAIKSDNG451JNDASDIO98JSXJHDAS123KNCH"              # той самий ключ, що в heartbeat.ps1
-BOT_TOKEN = "8599545336:AAF_WhKHqUO7AVMI-xTLPU9V2cICyVe9OKA"    # токен з @BotFather
-OWNER_ID = 309647458                      # твій Telegram ID (ЧИСЛО!)
-TIMEOUT = 180                             # сек, через скільки вважати "нема світла"
-CHECK_INTERVAL = 30                       # як часто перевіряти стан
+API_KEY = "DAIKSDNG451JNDASDIO98JSXJHDAS123KNCH"
+BOT_TOKEN = "8599545336:AAF_WhKHqUO7AVMI-xTLPU9V2cICyVe9OKA"
+OWNER_ID = 309647458
+
+RENDER_URL = "https://power-monitor2.onrender.com"
+WEBHOOK_PATH = "/webhook"
+TIMEOUT = 180  # сек
 # ==================================================
 
 app = FastAPI()
+bot = Bot(token=BOT_TOKEN)
+tg_app = Application.builder().token(BOT_TOKEN).build()
 
 db = sqlite3.connect("data.db", check_same_thread=False)
 cur = db.cursor()
 
-# ------------------ БАЗА ДАНИХ -------------------
+# ------------------ БАЗА ------------------
 cur.execute("""
 CREATE TABLE IF NOT EXISTS heartbeat (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -39,10 +38,10 @@ CREATE TABLE IF NOT EXISTS outages (
 )
 """)
 db.commit()
-# -------------------------------------------------
+# ------------------------------------------
 
 
-# ================== HEARTBEAT API =================
+# ================= HEARTBEAT =================
 @app.post("/alive")
 def alive(x_api_key: str = Header()):
     if x_api_key != API_KEY:
@@ -63,18 +62,17 @@ def is_online():
         return False, None
 
     last = datetime.fromisoformat(row[0])
-    online = datetime.utcnow() - last < timedelta(seconds=TIMEOUT)
-    return online, last
-# ==================================================
+    return datetime.utcnow() - last < timedelta(seconds=TIMEOUT), last
+# ============================================
 
 
-# ================== TELEGRAM ======================
-def is_authorized(update: Update) -> bool:
+# ================= TELEGRAM ==================
+def authorized(update: Update) -> bool:
     return update.effective_user.id == OWNER_ID
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
+    if not authorized(update):
         return
     await update.message.reply_text(
         "🤖 Power Monitor онлайн\n\n"
@@ -86,17 +84,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
+    if not authorized(update):
         return
     online, _ = is_online()
-    if online:
-        await update.message.reply_text("🟢 Світло Є")
-    else:
-        await update.message.reply_text("🔴 Світла НЕМАЄ")
+    await update.message.reply_text(
+        "🟢 Світло Є" if online else "🔴 Світла НЕМАЄ"
+    )
 
 
 async def cmd_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
+    if not authorized(update):
         return
 
     cur.execute("""
@@ -113,87 +110,53 @@ async def cmd_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
     end = datetime.fromisoformat(row[1]) if row[1] else None
 
     if end:
-        duration = end - start
         await update.message.reply_text(
             f"🔌 Останнє відключення:\n"
             f"Початок: {start}\n"
             f"Кінець: {end}\n"
-            f"Тривалість: {duration}"
+            f"Тривалість: {end - start}"
         )
     else:
         await update.message.reply_text(f"🔴 Світла нема з {start}")
 
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_authorized(update):
+    if not authorized(update):
         return
 
     today = datetime.utcnow().date()
     cur.execute("SELECT start_ts, end_ts FROM outages")
-    outages = cur.fetchall()
+    rows = cur.fetchall()
 
     no_power = timedelta()
-    for s, e in outages:
+    for s, e in rows:
         start = datetime.fromisoformat(s)
         end = datetime.fromisoformat(e) if e else datetime.utcnow()
-
         if start.date() == today:
             no_power += end - start
 
-    power = timedelta(hours=24) - no_power
     await update.message.reply_text(
-        f"⚡ Сьогодні світло було: {power}"
+        f"⚡ Сьогодні світло було: {timedelta(hours=24) - no_power}"
     )
-# ==================================================
 
 
-# ============ МОНИТОРИНГ СТАНУ =====================
-async def monitor(application):
-    was_online = True
-
-    while True:
-        online, _ = is_online()
-
-        if was_online and not online:
-            cur.execute(
-                "INSERT INTO outages (start_ts) VALUES (?)",
-                (datetime.utcnow().isoformat(),)
-            )
-            db.commit()
-            await application.bot.send_message(
-                OWNER_ID, "🔴 Світло ЗНИКЛО"
-            )
-
-        if not was_online and online:
-            cur.execute("""
-                UPDATE outages
-                SET end_ts = ?
-                WHERE end_ts IS NULL
-            """, (datetime.utcnow().isoformat(),))
-            db.commit()
-            await application.bot.send_message(
-                OWNER_ID, "🟢 Світло ЗʼЯВИЛОСЬ"
-            )
-
-        was_online = online
-        await asyncio.sleep(CHECK_INTERVAL)
-# ==================================================
+tg_app.add_handler(CommandHandler("start", cmd_start))
+tg_app.add_handler(CommandHandler("status", cmd_status))
+tg_app.add_handler(CommandHandler("today", cmd_today))
+tg_app.add_handler(CommandHandler("last", cmd_last))
+# ============================================
 
 
-# ================== ЗАПУСК БОТА ===================
-async def start_bot():
-    app_tg = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    app_tg.add_handler(CommandHandler("start", cmd_start))
-    app_tg.add_handler(CommandHandler("status", cmd_status))
-    app_tg.add_handler(CommandHandler("today", cmd_today))
-    app_tg.add_handler(CommandHandler("last", cmd_last))
-
-    asyncio.create_task(monitor(app_tg))
-    await app_tg.run_polling()
+# ================= WEBHOOK ===================
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(req: Request):
+    data = await req.json()
+    update = Update.de_json(data, bot)
+    await tg_app.process_update(update)
+    return {"ok": True}
 
 
 @app.on_event("startup")
 async def startup():
-    asyncio.create_task(start_bot())
-# ==================================================
+    await bot.set_webhook(url=RENDER_URL + WEBHOOK_PATH)
+# ============================================
